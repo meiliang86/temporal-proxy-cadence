@@ -105,6 +105,9 @@ reaches a different upstream with no change to the Worker.
   metadata carried onto the request-scoped series, so they can be sliced by a dimension only your callers know.
 - **Codec-transparent.** Payload data passes through untouched unless encryption is configured. The proxy reads only
   the Namespace and the fields it translates, and needs no knowledge of your data converter or codec.
+- **Cadence compatibility.** Serve the Cadence frontend API over gRPC and TChannel and translate every call onto the
+  Temporal WorkflowService, so existing Cadence Clients and Workers run on Temporal by changing only the address they
+  connect to. See [Cadence compatibility](#cadence-compatibility).
 - **Multiple deployment options.** Ship as a Go binary, a container image, or a Helm chart.
 
 ## Installation
@@ -396,6 +399,83 @@ changing a translation rule would. On a deployment that already labels, switch t
 The codec server has no upstream to consult: it compares payloads with the Namespace the request names. A Web UI or CLI
 pointed at the on-premises Temporal Service names `ns1`, so under `strict` it cannot open payloads labeled `ns1.acct`
 until it is pointed at Cloud. Use `permissive` during the migration if that view needs to decode.
+
+## Cadence compatibility
+
+The proxy can stand in for a Cadence frontend. Cadence Clients and Workers, unchanged, connect to it as if it were their
+Cadence cluster, and every call is translated onto the Temporal WorkflowService and sent through the gateway, so
+routing, Namespace translation, encryption, and outbound credentials apply to it exactly as to a Temporal SDK's call. A
+Cadence Domain is the Temporal Namespace of the same name. Workflow and Activity code, data converters, and context
+propagators do not change; only the host and port the application dials does.
+
+```yaml
+cadence:
+  grpc:
+    hostPort: :7833 # uber.cadence.api.v1 over gRPC, as a Cadence frontend serves it
+  tchannel:
+    hostPort: :7933 # the Thrift API over TChannel, for SDKs still on TChannel
+  # Optional. Absent, translated calls go to this proxy's own gateway, which must then be plaintext.
+  # temporal:
+  #   hostPort: localhost:7233
+  #   tls: { ca: ca.crt }
+```
+
+Either listener turns the frontend on. Both transports share one translation: the Thrift side reaches the proto
+handlers through the Cadence client's own Thrift-to-proto adapter. Cadence SDKs address the YARPC service
+`cadence-frontend`; set `cadence.serviceName` if yours uses another.
+
+What is covered: starting, signalling, signal-with-start, querying (including queries of closed Workflows and the
+built-in `__stack_trace`), cancelling, terminating, resetting, and describing Workflows; history, including long polls
+for the close event; Activities with retries, timeouts, heartbeats, cancellation, and asynchronous completion by token
+or by ID; timers; child Workflows; continue-as-new; cron schedules; Workflow retry policies; delayed starts; side
+effects, mutable side effects, `GetVersion`, and local Activities; sessions; headers and context propagation; memo,
+search attributes, and visibility, including Cadence's query syntax; Domain registration, description, update, and
+deprecation; and sticky execution. The end-to-end suite in [`e2e/cadence`](e2e/cadence) runs each of these with the
+Cadence Go SDK over both transports against a real Temporal Service, and replays every finished Workflow's translated
+history against its code to prove the history is one the code could have produced.
+
+Translation is stateless. Payloads, failures, and markers are carried byte for byte, so a Cadence Worker reads back
+exactly what it wrote. The mappings worth knowing about:
+
+- **Payloads.** A Cadence payload is one blob; it is stored as a single `binary/plain` Temporal payload. Memo and search
+  attribute values are stored as `json/plain`, which they are.
+- **Failures.** A Cadence reason and details become an ApplicationFailure whose type is the reason, so a retry policy's
+  non-retriable reasons work unchanged. Failures the Temporal Service raises itself come back with the reasons the
+  Cadence SDK recognizes, so a timeout is still a `TimeoutError` and a cancellation a `CanceledError`.
+- **Retries and timeouts.** Cadence does not retry an Activity that has no retry policy, so the proxy schedules it with
+  a single attempt rather than Temporal's default policy. With a policy, the expiration interval becomes the Activity's
+  schedule-to-close timeout, since Cadence applies schedule-to-close per attempt and Temporal across attempts.
+- **Attempts** count from 0 in Cadence and from 1 in Temporal; the proxy shifts them both ways.
+- **Task tokens** handed to a Cadence Worker wrap Temporal's together with the Namespace and Workflow Execution, which
+  Cadence's calls do not carry and Temporal's require.
+- **Versioning.** `GetVersion` upserts the `CadenceChangeVersion` search attribute; the proxy stores it as Temporal's
+  built-in `TemporalChangeVersion`, so no registration is needed.
+
+Before moving a Domain, register in Temporal any custom search attributes its Workflows use, Cadence's stock
+`CustomKeywordField` and friends included: a Temporal Namespace starts with none. `temporal operator search-attribute
+create` does it, as does the [end-to-end suite](e2e/cadence/harness_test.go) for the ones it uses. A Domain registered
+through the proxy becomes a Namespace with at least a day's retention, the shortest Temporal accepts by default.
+
+What does not carry over:
+
+- **Running Workflows.** The proxy moves where new Workflows run; a Workflow already running on Cadence finishes there.
+  Run the two side by side until the Cadence ones drain.
+- **Cross-Domain commands.** A child Workflow, signal, or cancellation aimed at another Domain is sent to the Workflow's
+  own Namespace, which is what Temporal deprecating cross-Namespace commands leaves.
+- **Cadence-only features** answer `Unimplemented`: schedules (`CreateSchedule` and friends), semaphores, Domain
+  failover and its history, archived-visibility listing, `RestartWorkflowExecution`, `RefreshWorkflowTasks`,
+  `DiagnoseWorkflowExecution`, `ExportWorkflowExecution`, and `GetTaskListsByDomain`. The asynchronous start calls start
+  synchronously.
+- **Cron overlap policies and start jitter** have no Temporal counterpart; jitter is applied once, at start.
+- **TLS on TChannel.** TChannel has none; terminate TLS in front of it, or move the SDK to gRPC, which the proxy can serve
+  over TLS through `cadence.grpc.tls`.
+
+Run the end-to-end suite with a `temporal` CLI on `PATH`, which `mise` installs; it starts a dev server and skips when
+there is no CLI to start one. Set `TEMPORAL_ADDRESS` to run it against a Temporal Service you already have.
+
+```bash
+go test ./e2e/cadence/...
+```
 
 ## Profiling
 

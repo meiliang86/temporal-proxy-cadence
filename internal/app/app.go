@@ -12,6 +12,7 @@ import (
 
 	"go.temporal.io/proxy/internal/api"
 	"go.temporal.io/proxy/internal/auth"
+	"go.temporal.io/proxy/internal/cadence"
 	"go.temporal.io/proxy/internal/certreload"
 	"go.temporal.io/proxy/internal/codecserver"
 	"go.temporal.io/proxy/internal/config"
@@ -93,6 +94,9 @@ func New(in Inputs, overrides ...fx.Option) *fx.App {
 		codecserver.Module,
 		connect.Module,
 		dataplane.Module,
+		// After dataplane.Module, so the frontend starts once the gateway it
+		// forwards to is listening, and stops before it.
+		cadence.Module,
 		httpserver.Module,
 		kms.Module,
 		metrics.Module,

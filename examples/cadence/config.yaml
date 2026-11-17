@@ -1,0 +1,23 @@
+# Runs Cadence Clients and Workers, unchanged, on a Temporal Service.
+#
+# Point a Cadence application at this proxy instead of its Cadence cluster:
+# port 7833 for an SDK on gRPC, 7933 for one on TChannel. Each Cadence Domain
+# runs in the Temporal Namespace of the same name.
+
+# The gateway, for Temporal SDKs, the CLI, and the Web UI. Translated Cadence
+# calls go through it too, so everything below applies to them.
+hostPort: 127.0.0.1:7233
+
+upstreams:
+  - name: temporal
+    hostPort: localhost:17233
+    insecure: true
+
+routing:
+  default: temporal
+
+cadence:
+  grpc:
+    hostPort: 127.0.0.1:7833
+  tchannel:
+    hostPort: 127.0.0.1:7933
