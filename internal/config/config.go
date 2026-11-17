@@ -20,6 +20,7 @@ type (
 		APITranslations  APITranslations     `yaml:"apiTranslations"`
 		AllowedServices  Services            `yaml:"allowedServices"`
 		Auth             *AuthConfig         `yaml:"auth"`
+		Cadence          *Cadence            `yaml:"cadence"`
 		Compression      Compression         `yaml:"compression"`
 		Encryption       Encryption          `yaml:"encryption"`
 		ExtensionServers ExtensionServerList `yaml:"extensionServers"`
@@ -133,6 +134,7 @@ func (c *Config) validate() error {
 		validation.Nested("routing", &c.Routing),
 		validation.WhenRules(func() bool { return c.Auth != nil }, validation.Nested("auth", c.Auth)),
 		validation.Nested("apiTranslations", &c.APITranslations),
+		validation.Nested("cadence", cadenceRules{c.Cadence, &c.Listen}),
 		validation.Nested("upstreams", &c.Upstreams),
 	}
 
